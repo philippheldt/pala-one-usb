@@ -89,13 +89,26 @@ If a book has no detected headings, the Chapters screen simply says "No chapters
 
 ### Using chapters
 
-Triple-click the button while reading → if the current book has chapters, the **Chapters** list opens:
+> Note: the chapter list is currently **not reachable** from the reader (triple-click now opens the Books list, see *Controls* below). Detection and caching still run.
+
+The Chapters list (when opened) works like this:
 
 - **short click** – next chapter
 - **double click** – previous chapter
 - **long click** – jump to the selected chapter
 
 The selected entry scrolls to stay centered; up to six entries are visible at once.
+
+## Controls
+
+| Where | Short click | Double click | Long click | Triple click |
+|---|---|---|---|---|
+| Reader | next page | previous page | save page as quote | → Books list (current book selected) |
+| Books list | next entry | open book | delete book (asks first) | → Home |
+| Home | next entry | open entry | – | – |
+| Confirm dialog | switch option | choose selected option | cancel | cancel |
+
+Paging past the last page of a book asks whether the finished book should be deleted ("Behalten" is preselected). The confirm dialog cancels itself after 30 s without input. Deleting requested by the PC tool (`pala_upload.py del`, sync) uses the same dialog.
 
 ## Prerequisites
 
