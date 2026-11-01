@@ -220,8 +220,7 @@ enum SerialUploadPhase {
   SERUP_IDLE,
   SERUP_HEADER,
   SERUP_DATA,
-  SERUP_RESYNC,
-  SERUP_CONFIRM_DEL
+  SERUP_RESYNC
 };
 
 struct SerialUploadState {
@@ -240,7 +239,6 @@ struct SerialUploadState {
   String pendingName;
   String pendingDelPath;
   String pendingDelLeaf;
-  int confirmSel = 1;
 };
 
 struct BatteryState {
@@ -4374,15 +4372,6 @@ static void redrawLibraryIfVisible() {
   if (mode == MODE_LIBRARY) drawLibrary();
 }
 
-static bool consumeSerialConfirmLine(String& into) {
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
-    if (c == '\n') { into.trim(); return true; }
-    if (into.length() < 64) into += c;
-  }
-  return false;
-}
-
 // ----------------------------------------------------------------------------
 //  Choice dialog (one-button UI)
 //  - short click : move selection
@@ -4492,11 +4481,6 @@ static String bookDisplayName(const String& path) {
   return leaf;
 }
 
-static void drawSerialDeleteDialog() {
-  drawChoiceDialog("Buch l\xC3\xB6schen?", bookDisplayName(g_serUp.pendingDelPath),
-                   "Angefordert vom Computer", "L\xC3\xB6schen", "Behalten", g_serUp.confirmSel);
-}
-
 static void drawUploading(const String& name) {
   prepareMenuFrame();
   u8g2.setFont(MAIN_FONT);
@@ -4579,37 +4563,6 @@ static void executePendingDelete() {
   Serial.println(needle);
   Serial.flush();
   redrawLibraryIfVisible();
-}
-
-static void declinePendingDelete() {
-  g_serUp.pendingName = "";
-  g_serUp.pendingDelPath = "";
-  g_serUp.pendingDelLeaf = "";
-  g_serUp.phase = SERUP_IDLE;
-  Serial.print("PALA:ERR:");
-  Serial.println("Cancelled");
-  Serial.flush();
-  redrawLibraryIfVisible();
-}
-
-static void handleSerialDeleteConfirm() {
-  if (btns.shortClick) {
-    g_serUp.confirmSel = 1 - g_serUp.confirmSel;
-    g_serUp.lastByteMs = millis();
-    drawSerialDeleteDialog();
-    return;
-  }
-  if (btns.doubleClick) {
-    if (g_serUp.confirmSel == 0) executePendingDelete();
-    else declinePendingDelete();
-    return;
-  }
-  if (btns.longClick || btns.tripleClick) { declinePendingDelete(); return; }
-  String line;
-  if (consumeSerialConfirmLine(line)) {
-    if (line.indexOf("PALA:NOPE") >= 0) { declinePendingDelete(); return; }
-  }
-  if ((uint32_t)(millis() - g_serUp.lastByteMs) > 60000UL) { declinePendingDelete(); }
 }
 
 static void pollSerialUpload() {
@@ -4739,10 +4692,8 @@ static void pollSerialUpload() {
           g_serUp.pendingName = delName;
           g_serUp.pendingDelPath = delPath;
           g_serUp.pendingDelLeaf = lastPathComponent(delPath);
-          g_serUp.lastByteMs = millis();
-          g_serUp.phase = SERUP_CONFIRM_DEL;
-          g_serUp.confirmSel = 1;
-          drawSerialDeleteDialog();
+          // Requested by the PC (sync): delete right away, no confirmation.
+          executePendingDelete();
           break;
         }
         if (!line.startsWith("PALA:UP:")) break;
@@ -4810,10 +4761,6 @@ static void pollSerialUpload() {
     return;
   }
 
-  if (g_serUp.phase == SERUP_CONFIRM_DEL) {
-    handleSerialDeleteConfirm();
-    return;
-  }
 
   if (g_serUp.phase == SERUP_DATA) {
     while (g_serUp.receivedBytes < g_serUp.totalBytes) {

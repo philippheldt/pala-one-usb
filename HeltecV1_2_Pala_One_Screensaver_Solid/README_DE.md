@@ -100,7 +100,7 @@ Hat ein Buch keine erkannten Überschriften, zeigt die Kapitelansicht „No chap
 | Startseite | nächster Eintrag | Eintrag öffnen | – | – |
 | Rückfrage-Dialog | Option wechseln | markierte Option wählen | abbrechen | abbrechen |
 
-Wer über die letzte Seite hinaus weiterblättert, wird gefragt, ob das fertig gelesene Buch gelöscht werden soll („Behalten“ ist vorausgewählt). Ohne Eingabe bricht der Dialog nach 30 s ab. Löschanfragen vom PC (`pala_upload.py del`, Sync) nutzen denselben Dialog.
+Wer über die letzte Seite hinaus weiterblättert, wird gefragt, ob das fertig gelesene Buch gelöscht werden soll („Behalten“ ist vorausgewählt). Ohne Eingabe bricht der Dialog nach 30 s ab. Löschanfragen vom PC (`pala_upload.py del`, Sync) werden ohne Rückfrage sofort ausgeführt.
 
 ## Bauen & Flashen
 

@@ -108,7 +108,7 @@ The selected entry scrolls to stay centered; up to six entries are visible at on
 | Home | next entry | open entry | – | – |
 | Confirm dialog | switch option | choose selected option | cancel | cancel |
 
-Paging past the last page of a book asks whether the finished book should be deleted ("Behalten" is preselected). The confirm dialog cancels itself after 30 s without input. Deleting requested by the PC tool (`pala_upload.py del`, sync) uses the same dialog.
+Paging past the last page of a book asks whether the finished book should be deleted ("Behalten" is preselected). The confirm dialog cancels itself after 30 s without input. Deletes requested by the PC tool (`pala_upload.py del`, sync) run immediately without a dialog.
 
 ## Prerequisites
 
