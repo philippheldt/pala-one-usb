@@ -220,8 +220,7 @@ enum SerialUploadPhase {
   SERUP_IDLE,
   SERUP_HEADER,
   SERUP_DATA,
-  SERUP_RESYNC,
-  SERUP_CONFIRM_DEL
+  SERUP_RESYNC
 };
 
 struct SerialUploadState {
@@ -400,6 +399,7 @@ static void storeOffsetCache(const String& path, int page, uint32_t offset);
 static void idlePrefetchReader();
 static String pageCachePathForBook(const String& path);
 static bool loadPageOffsetCacheForBook(const String& path, size_t expectedSize);
+static bool onlyWhitespaceFrom(File& f, uint32_t off);
 static void savePageOffsetCacheForBook(const String& path, size_t fileSize);
 static size_t fsTotalBytesSafe();
 static size_t fsUsedBytesSafe();
@@ -435,6 +435,8 @@ static void clearChapters();
 static bool loadChaptersForBook(const String& path, size_t expectedSize);
 static void buildChaptersForBook();
 static void drawSleepScreen();
+static void deleteBookFile(const String& path);
+static void enterBooksList(const String& selectPath);
 static void goToSleep();
 static void pollSerialUpload();
 static bool serialUploadActive();
@@ -1069,6 +1071,15 @@ static bool loadPageOffsetCacheForBook(const String& path, size_t expectedSize) 
     g_reader.pageOffsets[0] = 0;
     return false;
   }
+
+  // Drop trailing pages that start at/after the end of the text.
+  if (g_reader.file) {
+    while (g_reader.knownPages > 1 &&
+           onlyWhitespaceFrom(g_reader.file, g_reader.pageOffsets[g_reader.knownPages - 1])) {
+      g_reader.knownPages--;
+      g_reader.eofReached = true;
+    }
+  }
   return true;
 }
 
@@ -1114,13 +1125,13 @@ static void loadListItems() {
     if (pos + 1 + MAX_LIST_TEXT + 1 > got) break;
     g_list.items[i].done = buf[pos++];
     memcpy(g_list.items[i].text, &buf[pos], MAX_LIST_TEXT + 1);
-    g_list.items[i].text[MAX_LIST_TEXT] = ' ';
+    g_list.items[i].text[MAX_LIST_TEXT] = '\0';
     pos += (MAX_LIST_TEXT + 1);
     String t = String(g_list.items[i].text);
     sanitizeListText(t);
     if (t.length() == 0) continue;
     strncpy(g_list.items[g_list.count].text, t.c_str(), MAX_LIST_TEXT);
-    g_list.items[g_list.count].text[MAX_LIST_TEXT] = ' ';
+    g_list.items[g_list.count].text[MAX_LIST_TEXT] = '\0';
     g_list.items[g_list.count].done = g_list.items[i].done ? 1 : 0;
     g_list.count++;
   }
@@ -1376,12 +1387,6 @@ static void buildLibraryEntries() {
       g_library.entryCount++;
     }
 
-    if (g_library.entryCount < MAX_LIBRARY_ENTRIES) {
-      g_library.entryTypes[g_library.entryCount] = LIB_ENTRY_BOOKMARKS;
-      g_library.entryRefs[g_library.entryCount] = -1;
-      g_library.entryDepths[g_library.entryCount] = 0;
-      g_library.entryCount++;
-    }
     if (listHasVisibleItems() && g_library.entryCount < MAX_LIBRARY_ENTRIES) {
       g_library.entryTypes[g_library.entryCount] = LIB_ENTRY_LIST;
       g_library.entryRefs[g_library.entryCount] = -1;
@@ -2153,12 +2158,31 @@ static uint32_t pageOffsetForPage(File& f, const String& path, int page) {
   return off;
 }
 
+// True if everything from `off` to the end of the file is whitespace
+// (or `off` is already at/after the end). Used so that trailing blank
+// lines never produce an empty extra page.
+static bool onlyWhitespaceFrom(File& f, uint32_t off) {
+  size_t sz = f.size();
+  if (off >= sz) return true;
+  if (sz - off > 512) return false;
+  f.seek(off);
+  while (f.available()) {
+    int c = f.read();
+    if (c != ' ' && c != '\n' && c != '\r' && c != '\t') return false;
+  }
+  return true;
+}
+
 static void ensureOffsetsUpTo(int targetPage) {
   bool addedOffsets = false;
   while (!g_reader.eofReached && g_reader.knownPages <= targetPage && g_reader.knownPages < MAX_PAGES) {
     uint32_t start = g_reader.pageOffsets[g_reader.knownPages - 1];
     uint32_t next = buildNextOffset(start);
-    if (next <= start) {
+    // The page starting at `start` already reaches the end of the book:
+    // there is no further page (previously an empty "phantom" page at
+    // offset == file size was added here, which made the reader jump back
+    // to page 1 instead of detecting the end of the book).
+    if (next <= start || onlyWhitespaceFrom(g_reader.file, next)) {
       g_reader.eofReached = true;
       break;
     }
@@ -2282,12 +2306,11 @@ static void renderCurrentPage() {
   if (g_reader.pageIndex < 0) g_reader.pageIndex = 0;
   if (g_reader.pageIndex >= g_reader.knownPages) g_reader.pageIndex = g_reader.knownPages - 1;
 
-  if (g_reader.pageOffsets[g_reader.pageIndex] >= bookSize) {
-    g_reader.pageIndex = 0;
-    g_reader.knownPages = 1;
-    g_reader.pageOffsets[0] = 0;
-    g_reader.eofReached = false;
+  while (g_reader.knownPages > 1 && g_reader.pageOffsets[g_reader.knownPages - 1] >= bookSize) {
+    g_reader.knownPages--;
+    g_reader.eofReached = true;
   }
+  if (g_reader.pageIndex >= g_reader.knownPages) g_reader.pageIndex = g_reader.knownPages - 1;
 
   uint32_t start = g_reader.pageOffsets[g_reader.pageIndex];
   g_reader.lastPageStartOffset = start;
@@ -3886,7 +3909,7 @@ static void handleListSaveWeb() {
     sanitizeListText(text);
     if (text.length() == 0) continue;
     strncpy(newList.items[newList.count].text, text.c_str(), MAX_LIST_TEXT);
-    newList.items[newList.count].text[MAX_LIST_TEXT] = ' ';
+    newList.items[newList.count].text[MAX_LIST_TEXT] = '\0';
     newList.items[newList.count].done = server.hasArg(doneName) ? 1 : 0;
     newList.count++;
     if (newList.count >= MAX_LIST_ITEMS) break;
@@ -3916,7 +3939,7 @@ static void handleListClearDoneWeb() {
     if (server.hasArg(doneName)) continue;  // checked in web UI => delete it
 
     strncpy(newList.items[newList.count].text, text.c_str(), MAX_LIST_TEXT);
-    newList.items[newList.count].text[MAX_LIST_TEXT] = ' ';
+    newList.items[newList.count].text[MAX_LIST_TEXT] = '\0';
     newList.items[newList.count].done = 0;
     newList.count++;
     if (newList.count >= MAX_LIST_ITEMS) break;
@@ -4349,43 +4372,113 @@ static void redrawLibraryIfVisible() {
   if (mode == MODE_LIBRARY) drawLibrary();
 }
 
-static bool consumeSerialConfirmLine(String& into) {
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
-    if (c == '\n') { into.trim(); return true; }
-    if (into.length() < 64) into += c;
+// ----------------------------------------------------------------------------
+//  Choice dialog (one-button UI)
+//  - short click : move selection
+//  - double click: confirm the selected option
+//  - long/triple click or timeout: cancel
+//  The safe option (index 1) is preselected.
+// ----------------------------------------------------------------------------
+static void drawChoiceDialog(const char* title, const String& item, const char* hint,
+                             const char* optAction, const char* optSafe, int selected) {
+  prepareMenuFrame();
+  int y = drawSectionHeader(title, true);
+
+  u8g2.setFont(BOLD_FONT);
+  int ascent = u8g2.getFontAscent();
+  int descent = u8g2.getFontDescent();
+  int lineH = (ascent - descent) + 2;
+  const int maxW = SCREEN_W - 2 * UI_LIST_LEFT;
+
+  String l1, l2;
+  splitListLabelForDisplay(item, maxW, l1, l2);
+  u8g2.setCursor(UI_LIST_LEFT, y);
+  u8g2.print(l1.c_str());
+  if (l2.length() > 0) {
+    y += lineH;
+    u8g2.setCursor(UI_LIST_LEFT, y);
+    u8g2.print(l2.c_str());
   }
+
+  u8g2.setFont(MAIN_FONT);
+  if (hint && hint[0]) {
+    y += lineH + 2;
+    u8g2.setCursor(UI_LIST_LEFT, y);
+    u8g2.print(hint);
+  }
+
+  // Two option rows, anchored above the key legend.
+  const int rowH = 14;
+  const int rowX = UI_LIST_LEFT - 2;
+  const int rowW = SCREEN_W - 2 * rowX;
+  const int legendBaseline = SCREEN_H - 2;
+  const int row1Top = legendBaseline - 9 - rowH;
+  const int row0Top = row1Top - rowH - 1;
+  const char* opts[2] = { optAction, optSafe };
+  const int tops[2] = { row0Top, row1Top };
+  u8g2.setFont(BOLD_FONT);
+  int optAscent = u8g2.getFontAscent();
+  for (int i = 0; i < 2; i++) {
+    int baseline = tops[i] + (rowH + optAscent) / 2;
+    if (i == selected) {
+      gfx.fillRoundRect(rowX, tops[i], rowW, rowH, 3, 1);
+      u8g2.setForegroundColor(0);
+      u8g2.setBackgroundColor(1);
+      u8g2.setCursor(rowX + 6, baseline);
+      u8g2.print("> ");
+      u8g2.print(opts[i]);
+      u8g2.setForegroundColor(1);
+      u8g2.setBackgroundColor(0);
+    } else {
+      gfx.drawRoundRect(rowX, tops[i], rowW, rowH, 3, 1);
+      u8g2.setCursor(rowX + 6 + u8g2.getUTF8Width("> "), baseline);
+      u8g2.print(opts[i]);
+    }
+  }
+
+  u8g2.setFont(u8g2_font_5x7_tf);
+  const char* legend = "1x: wechseln   2x: ausw\xC3\xA4hlen";
+  int lw = u8g2.getUTF8Width(legend);
+  u8g2.setCursor((SCREEN_W - lw) / 2, legendBaseline);
+  u8g2.print(legend);
+
+  u8g2.setFont(MAIN_FONT);
+  display.update();
+}
+
+// Blocking variant for dialogs started from the UI.
+// Returns true if the action option (not the safe one) was confirmed.
+static bool runChoiceDialog(const char* title, const String& item, const char* hint,
+                            const char* optAction, const char* optSafe,
+                            uint32_t timeoutMs = 30000) {
+  int selected = 1;
+  drawChoiceDialog(title, item, hint, optAction, optSafe, selected);
+  resetInputFrontend();
+
+  uint32_t lastInput = millis();
+  while ((uint32_t)(millis() - lastInput) < timeoutMs) {
+    btns.poll();
+    if (btns.shortClick) {
+      selected = 1 - selected;
+      lastInput = millis();
+      drawChoiceDialog(title, item, hint, optAction, optSafe, selected);
+    } else if (btns.doubleClick) {
+      resetInputFrontend();
+      return selected == 0;
+    } else if (btns.longClick || btns.tripleClick) {
+      resetInputFrontend();
+      return false;
+    }
+    delay(10);
+  }
+  resetInputFrontend();
   return false;
 }
 
-static void drawSerialConfirm(const String& title, const String& item, bool isDelete) {
-  prepareMenuFrame();
-  u8g2.setFont(MAIN_FONT);
-  int ascent = u8g2.getFontAscent();
-  int descent = u8g2.getFontDescent();
-  int lineH = (ascent - descent) + g_settings.lineGap + 1;
-  int maxW = SCREEN_W - 2 * MARGIN_X;
-  int y = drawSectionHeader("Confirm", true);
-  y += lineH;
-
-  u8g2.setFont(BOLD_FONT);
-  u8g2.setCursor(MARGIN_X, y);
-  u8g2.print(title.c_str());
-  y += lineH;
-  u8g2.setFont(MAIN_FONT);
-
-  String show = item;
-  while (show.length() > 0 && u8g2.getUTF8Width(show.c_str()) > maxW) show.remove(show.length() - 1);
-  u8g2.setCursor(MARGIN_X, y);
-  u8g2.print(show.c_str());
-  y += lineH * 2;
-
-  u8g2.setCursor(MARGIN_X, y);
-  u8g2.print(isDelete ? "Hold: cancel    2x: delete" : "Hold: cancel   2x: accept");
-  y += lineH;
-  u8g2.setCursor(MARGIN_X, y);
-  u8g2.print("No input: auto-cancel");
-  display.update();
+static String bookDisplayName(const String& path) {
+  String leaf = stripTxtExt(lastPathComponent(path));
+  leaf.replace('_', ' ');
+  return leaf;
 }
 
 static void drawUploading(const String& name) {
@@ -4470,27 +4563,6 @@ static void executePendingDelete() {
   Serial.println(needle);
   Serial.flush();
   redrawLibraryIfVisible();
-}
-
-static void declinePendingDelete() {
-  g_serUp.pendingName = "";
-  g_serUp.pendingDelPath = "";
-  g_serUp.pendingDelLeaf = "";
-  g_serUp.phase = SERUP_IDLE;
-  Serial.print("PALA:ERR:");
-  Serial.println("Cancelled");
-  Serial.flush();
-  redrawLibraryIfVisible();
-}
-
-static void handleSerialDeleteConfirm() {
-  if (btns.longClick) { executePendingDelete(); return; }
-  if (btns.doubleClick || btns.tripleClick) { declinePendingDelete(); return; }
-  String line;
-  if (consumeSerialConfirmLine(line)) {
-    if (line.indexOf("PALA:NOPE") >= 0) { declinePendingDelete(); return; }
-  }
-  if ((uint32_t)(millis() - g_serUp.lastByteMs) > 60000UL) { declinePendingDelete(); }
 }
 
 static void pollSerialUpload() {
@@ -4620,9 +4692,8 @@ static void pollSerialUpload() {
           g_serUp.pendingName = delName;
           g_serUp.pendingDelPath = delPath;
           g_serUp.pendingDelLeaf = lastPathComponent(delPath);
-          g_serUp.lastByteMs = millis();
-          g_serUp.phase = SERUP_CONFIRM_DEL;
-          drawSerialConfirm("Delete this book?", g_serUp.pendingDelLeaf, true);
+          // Requested by the PC (sync): delete right away, no confirmation.
+          executePendingDelete();
           break;
         }
         if (!line.startsWith("PALA:UP:")) break;
@@ -4690,10 +4761,6 @@ static void pollSerialUpload() {
     return;
   }
 
-  if (g_serUp.phase == SERUP_CONFIRM_DEL) {
-    handleSerialDeleteConfirm();
-    return;
-  }
 
   if (g_serUp.phase == SERUP_DATA) {
     while (g_serUp.receivedBytes < g_serUp.totalBytes) {
@@ -5007,6 +5074,33 @@ void setup() {
 // ============================================================================
 //  Mode handlers
 // ============================================================================
+static void deleteBookFile(const String& path) {
+  if (g_reader.currentBookPath == path) {
+    clearCurrentBookState();
+    resetPreviewState();
+    syncWakeState(false);
+  }
+  if (FS.exists(path)) FS.remove(path);
+  deleteBookMetadata(path);
+  resetOffsetCache();
+  loadBooks();
+}
+
+// Open the flat "Books" list and preselect the given book (if present).
+static void enterBooksList(const String& selectPath) {
+  safeCloseCurrentBook();
+  resetPreviewState();
+  syncWakeState(false);
+  mode = MODE_LIBRARY;
+  g_library.currentFolder = "";
+  g_library.selectedItem = 0;
+  g_library.booksFolderMode = (g_library.bookCount > 0);
+  for (int i = 0; i < g_library.bookCount; i++) {
+    if (selectPath == g_library.books[i].path) { g_library.selectedItem = i; break; }
+  }
+  drawLibrary();
+}
+
 static void handleModeUpload() {
   server.handleClient();
   bool timeout = (uint32_t)(millis() - g_upload.startedMs) > UPLOAD_AUTO_EXIT_MS;
@@ -5140,7 +5234,7 @@ static void handleModeLibrary() {
   buildLibraryEntries();
   int totalItems = g_library.entryCount;
 
-  // --- LongClick: Sicherheitsabfrage zum Löschen anzeigen ---
+  // Long click on a book: ask before deleting it.
   if (btns.longClick) {
     if (g_library.selectedItem >= 0 && g_library.selectedItem < g_library.entryCount) {
       LibraryEntryType entryType = g_library.entryTypes[g_library.selectedItem];
@@ -5148,48 +5242,16 @@ static void handleModeLibrary() {
 
       if (entryType == LIB_ENTRY_BOOK && entryRef >= 0 && entryRef < g_library.bookCount) {
         String fileToDelete = String(g_library.books[entryRef].path);
-        String leafName = lastPathComponent(fileToDelete);
-
-        // Bestätigungsscreen anzeigen
-        drawSerialConfirm("Buch loeschen?", leafName, true);
-
-        // Auf Bestätigung warten
-        uint32_t startWait = millis();
-        resetInputFrontend();
-
-        while ((millis() - startWait) < 10000) { // 10 Sekunden Timeout
-          btns.poll();
-
-          // 2x Klick = JA, LÖSCHEN
-          if (btns.doubleClick) {
-            if (g_reader.currentBookPath == fileToDelete) {
-              clearCurrentBookState();
-              resetPreviewState();
-              syncWakeState(false);
-            }
-            if (FS.exists(fileToDelete)) {
-              FS.remove(fileToDelete);
-            }
-            deleteBookMetadata(fileToDelete);
-            resetOffsetCache();
-            loadBooks();
-            drawLibrary();
-            return;
-          }
-
-          // 1x Klick, LongClick oder TripleClick = ABBRECHEN
-          if (btns.shortClick || btns.longClick || btns.tripleClick) {
-            drawLibrary();
-            return;
-          }
-          delay(10);
+        if (runChoiceDialog("Buch l\xC3\xB6schen?", bookDisplayName(fileToDelete),
+                            "Wird vom Pala entfernt.", "L\xC3\xB6schen", "Behalten")) {
+          deleteBookFile(fileToDelete);
+          if (g_library.bookCount == 0) g_library.booksFolderMode = false;
         }
-
-        // Timeout -> Abbrechen
         drawLibrary();
         return;
       }
     }
+    return;
   }
 
   if (btns.shortClick) {
@@ -5325,31 +5387,18 @@ static void handleModeReader() {
     bool isAtEnd = g_reader.eofReached && (g_reader.pageIndex >= g_reader.knownPages - 1);
 
     if (isAtEnd) {
-      String fileToDelete = g_reader.currentBookPath;
-
-      // WICHTIG: Dateihandle explizit schließen, sonst schlägt FS.remove() fehl!
-      safeCloseCurrentBook();
-
-      // Datei vom Flash-Speicher löschen
-      if (fileToDelete.length() > 0 && FS.exists(fileToDelete)) {
-        FS.remove(fileToDelete);
+      String finishedPath = g_reader.currentBookPath;
+      bool del = runChoiceDialog("Buch zu Ende gelesen", bookDisplayName(finishedPath),
+                                 "Vom Pala l\xC3\xB6schen?", "L\xC3\xB6schen", "Behalten");
+      if (del) {
+        safeCloseCurrentBook();
+        deleteBookFile(finishedPath);
+        enterBooksList("");
+      } else {
+        // Back to the last page with a clean full refresh.
+        g_reader.pageTurnsSinceFull = FULL_REFRESH_EVERY_N_PAGES;
+        renderCurrentPage();
       }
-
-      // Metadaten & NVS-Wakeup-Pfade aufräumen
-      deleteBookMetadata(fileToDelete);
-      resetOffsetCache();
-
-      // Reader-Zustand komplett leeren
-      clearCurrentBookState();
-
-      // NVS Wakeup-Modus zurücksetzen, damit beim Neustart nicht das Buch gesucht wird
-      syncWakeState(false);
-
-      // Bücher-Array im RAM neu einlesen
-      loadBooks();
-
-      // Zurück zum Hauptbildschirm
-      enterLibraryRoot(true);
       return;
     }
 
@@ -5435,7 +5484,12 @@ void loop() {
   }
 
   if (btns.tripleClick && mode != MODE_UPLOAD && mode != MODE_BM_PREVIEW) {
-    enterLibraryRoot(true);
+    // Reader -> Books list (current book preselected) -> Home
+    if (mode == MODE_READER || mode == MODE_CHAPTERS) {
+      enterBooksList(g_reader.currentBookPath);
+    } else {
+      enterLibraryRoot(true);
+    }
     resetInputFrontend();
     return;
   }

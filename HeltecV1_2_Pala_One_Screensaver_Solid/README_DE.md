@@ -83,12 +83,24 @@ als Cache ab — beim nächsten Öffnen ist die Navigation sofort da.
 Die erste Zeile der Datei (meist Titel/Autor) wird nie als Kapitel gewertet.
 Hat ein Buch keine erkannten Überschriften, zeigt die Kapitelansicht „No chapters".
 
-**Nutzung:** Im Lesemodus **Triple-Klick** auf den Button → falls Kapitel vorhanden, öffnet
-sich die **Kapitelliste**:
+> Hinweis: Die Kapitelliste ist aus dem Lesemodus derzeit **nicht erreichbar** (Triple-Klick öffnet jetzt die Bücherliste, siehe *Bedienung*). Erkennung und Cache laufen weiterhin.
+
+**Nutzung der Kapitelliste** (wenn geöffnet):
 
 - **kurzer Klick** – nächstes Kapitel
 - **Doppelklick** – vorheriges Kapitel
 - **langer Klick** – zum markierten Kapitel springen
+
+## Bedienung
+
+| Wo | Kurzer Klick | Doppelklick | Langer Klick | Triple-Klick |
+|---|---|---|---|---|
+| Lesemodus | nächste Seite | vorherige Seite | Seite als Zitat speichern | → Bücherliste (aktuelles Buch markiert) |
+| Bücherliste | nächster Eintrag | Buch öffnen | Buch löschen (mit Rückfrage) | → Startseite |
+| Startseite | nächster Eintrag | Eintrag öffnen | – | – |
+| Rückfrage-Dialog | Option wechseln | markierte Option wählen | abbrechen | abbrechen |
+
+Wer über die letzte Seite hinaus weiterblättert, wird gefragt, ob das fertig gelesene Buch gelöscht werden soll („Behalten“ ist vorausgewählt). Ohne Eingabe bricht der Dialog nach 30 s ab. Löschanfragen vom PC (`pala_upload.py del`, Sync) werden ohne Rückfrage sofort ausgeführt.
 
 ## Bauen & Flashen
 
