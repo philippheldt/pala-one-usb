@@ -5,12 +5,37 @@ import glob
 import re
 import json
 import tempfile
+import argparse
 from datetime import datetime
 import pala_upload
 
-SOURCE_DIR = os.path.expanduser("~/pCloud Drive/books-articles")
+DEFAULT_SOURCE_DIR = os.path.expanduser("~/pCloud Drive/books-articles")
+SOURCE_DIR = DEFAULT_SOURCE_DIR
 NOTES_DIR = os.path.join(SOURCE_DIR, "Notes")
-STATE_FILE = os.path.join(os.path.dirname(__file__), ".pala_state.json")
+# The sync state lives in the sync folder itself, so every Mac (and the
+# Mac app as well as this script) sees the same state via pCloud.
+STATE_FILE = os.path.join(SOURCE_DIR, ".pala_state.json")
+# Older versions kept the state next to this script.
+LEGACY_STATE_FILES = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pala_state.json"),
+    os.path.expanduser("~/pCloud Drive/pala-usb-tool/tools/.pala_state.json"),
+]
+
+# Machine-readable progress for the Mac app (enabled with --events).
+EVENTS = False
+STATS = {"uploaded": 0, "upload_failed": 0, "deleted_local": 0, "deleted_pala": 0, "quotes": 0}
+
+
+def emit(event, **data):
+    if EVENTS:
+        print("@@PALA " + json.dumps(dict(event=event, **data), ensure_ascii=False), flush=True)
+
+
+def configure(source_dir):
+    global SOURCE_DIR, NOTES_DIR, STATE_FILE
+    SOURCE_DIR = os.path.abspath(os.path.expanduser(source_dir))
+    NOTES_DIR = os.path.join(SOURCE_DIR, "Notes")
+    STATE_FILE = os.path.join(SOURCE_DIR, ".pala_state.json")
 
 def simplify_name(name):
     return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
@@ -93,7 +118,7 @@ def extract_existing_quotes_from_md(md_path):
             content = f.read()
 
         # Parst bestehende Zitate-Blöcke (> "Text" \n *(Seite X)*)
-        matches = re.findall(r'>\s*"?([\s\S]*?)"?\s*\n\*\((?:Seite\vert{}Seiten)\s*([0-9–\-]+)\)\*', content)
+        matches = re.findall(r'>\s*"?([\s\S]*?)"?\s*\n\*\((?:Seiten|Seite)\s*([0-9–\-]+)\)\*', content)
         for text, page_num in matches:
             # Bei Bereichen wie "3–4" nehmen wir die erste Seite für die Sortierung
             first_page = page_num.split("–")[0].split("-")[0].strip()
@@ -191,6 +216,8 @@ def sync_quotes_log(port):
                     mf.write(md_code)
 
                 print(f"✅ Zitate angehängt & aktualisiert: Notes/{md_filename}")
+                STATS["quotes"] += len(raw_new_quotes)
+                emit("quotes", book=book_name, count=len(raw_new_quotes), file=md_filename)
 
             os.remove(temp_log)
 
@@ -201,12 +228,16 @@ def sync_quotes_log(port):
             print("\n    (Keine neuen Zitate auf dem Pala vorhanden)")
 
 def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return set(json.load(f))
-        except Exception:
-            pass
+    for path in [STATE_FILE] + LEGACY_STATE_FILES:
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    state = set(json.load(f))
+                if path != STATE_FILE:
+                    print(f"   Übernehme bisherigen Sync-Status aus {path}")
+                return state
+            except Exception:
+                pass
     return set()
 
 def save_state(state_set):
@@ -268,17 +299,31 @@ def truncate_txt_to_today(txt_path):
 
     return os.path.abspath(txt_path)
 
-def run_sync():
-    port = pala_upload.find_port()
+def run_sync(port=None):
+    if not os.path.isdir(SOURCE_DIR):
+        print(f"Sync-Ordner nicht gefunden: {SOURCE_DIR}")
+        emit("error", message=f"Sync-Ordner nicht gefunden: {SOURCE_DIR}")
+        return 1
+
+    port = port or pala_upload.find_port()
     if not port:
         print("Kein Pala über USB gefunden. Bitte anschließen!")
+        emit("error", message="Kein Pala über USB gefunden.")
         return 1
 
     # 1. Zitate verarbeiten & Pala Log leeren
+    emit("step", name="Zitate abholen")
     sync_quotes_log(port)
 
     print("\n--> Lese aktuelle Dateien vom Pala...")
-    pala_books = pala_upload.fetch_books(port) or []
+    emit("step", name="Bücherliste lesen")
+    pala_books = pala_upload.fetch_books(port)
+    if not isinstance(pala_books, list):
+        # Never continue without a valid list: an empty list would make every
+        # book look "read" and delete it from pCloud.
+        print("Konnte die Bücherliste nicht vom Pala lesen. Abbruch.")
+        emit("error", message="Konnte die Bücherliste nicht vom Pala lesen.")
+        return 1
 
     pala_simple_set = set()
     for b in pala_books:
@@ -329,6 +374,8 @@ def run_sync():
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 processed_removals.add(filepath)
+                STATS["deleted_local"] += 1
+                emit("deleted_local", name=os.path.basename(filepath))
             except Exception as e:
                 print(f"    Fehler beim Löschen der pCloud-Datei: {e}")
 
@@ -343,7 +390,9 @@ def run_sync():
 
         if simple_remote not in local_files and simple_remote_base not in local_files:
             print(f"--> Lösche vom Pala (in pCloud entfernt): {remote_file}")
-            pala_upload.delete_book(port, remote_file)
+            if pala_upload.delete_book(port, remote_file) == 0:
+                STATS["deleted_pala"] += 1
+                emit("deleted_pala", name=remote_file)
 
     # 5. HOCHLADEN NEUER BÜCHER & TÄGLICHES BIBEL-UPDATE:
     print("\n--- PRÜFE AUF NEUE BÜCHER & BIBEL-UPDATES ---")
@@ -351,7 +400,8 @@ def run_sync():
     uploaded_paths = set()
 
     for simple_key, (local_path, expected_name) in local_files.items():
-        if local_path in uploaded_paths:
+        if local_path in uploaded_paths or local_path in processed_removals:
+            # just deleted from pCloud because it was read on the Pala
             continue
         uploaded_paths.add(local_path)
 
@@ -371,12 +421,19 @@ def run_sync():
 
             # 3. Gekürzten Text neu hochladen
             print(f"--> Übertrage tagesaktuelle Bibel auf Pala: {os.path.basename(upload_src)}")
+            emit("uploading", name=os.path.basename(expected_name))
             pala_upload.upload_book(port, upload_src)
 
         else:
             if simple_full not in pala_simple_set and simple_base not in pala_simple_set:
                 print(f"--> Übertrage neu auf Pala: {os.path.basename(local_path)}")
-                pala_upload.upload_book(port, local_path)
+                emit("uploading", name=os.path.basename(local_path))
+                if pala_upload.upload_book(port, local_path) == 0:
+                    STATS["uploaded"] += 1
+                    emit("uploaded", name=os.path.basename(local_path))
+                else:
+                    STATS["upload_failed"] += 1
+                    emit("upload_failed", name=os.path.basename(local_path))
             else:
                 print(f"    Bereits auf Pala: {os.path.basename(local_path)}")
 
@@ -386,7 +443,32 @@ def run_sync():
     save_state(current_pala_state)
 
     print("\nSpiegelung erfolgreich beendet!")
+    emit("done", **STATS)
     return 0
 
+
+def main():
+    global EVENTS
+    parser = argparse.ArgumentParser(description="Pala One: pCloud-Ordner mit dem Pala synchronisieren")
+    parser.add_argument("--source", default=DEFAULT_SOURCE_DIR, help="Sync-Ordner (Standard: ~/pCloud Drive/books-articles)")
+    parser.add_argument("--port", help="Serieller Port (Standard: automatisch)")
+    parser.add_argument("--events", action="store_true", help="Maschinenlesbare Fortschrittszeilen ausgeben (für die Mac-App)")
+    args = parser.parse_args()
+
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+    EVENTS = args.events
+    configure(args.source)
+    try:
+        return run_sync(args.port)
+    except Exception as e:
+        print(f"Fehler: {e}")
+        emit("error", message=str(e))
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(run_sync())
+    sys.exit(main())
