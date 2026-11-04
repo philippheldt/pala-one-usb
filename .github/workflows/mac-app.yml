@@ -1,0 +1,39 @@
+name: Mac App
+
+on:
+  push:
+    branches: [main, mac-sync-app]
+    paths: ["mac/**", "tools/**", ".github/workflows/mac-app.yml"]
+  pull_request:
+    paths: ["mac/**", "tools/**", ".github/workflows/mac-app.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python build deps
+        run: python3 -m pip install pyinstaller==6.11.1 pyserial==3.5
+
+      - name: Check Python sync script
+        run: python3 tools/sync_books.py --help
+
+      - name: Build app
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./mac/build_app.sh
+
+      - name: Smoke test bundled sync
+        run: '"mac/build/Pala Sync.app/Contents/Resources/pala-sync/pala-sync" --help'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pala-Sync
+          path: mac/build/Pala-Sync.zip
+          if-no-files-found: error

@@ -559,6 +559,7 @@ def download_book(port, remote_path, local_save_path):
 
         lines = []
         started = False
+        finished = False
         deadline = time.time() + (5 if fast else 15)
 
         while time.time() < deadline:
@@ -566,15 +567,20 @@ def download_book(port, remote_path, local_save_path):
             if not line:
                 continue
             line_str = line.strip()
+            if "PALA:ERR:File not found" in line_str:
+                return False
             if "PALA:READ:START" in line_str:
                 started = True
                 continue
             if "PALA:READ:END" in line_str:
+                finished = True
                 break
             if started:
                 lines.append(line)
 
-        if lines:
+        if started and finished or lines:
+            # An empty file is a valid answer too - no need to wake/reset
+            # the reader just because there are no new quotes.
             with open(local_save_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
             return True
