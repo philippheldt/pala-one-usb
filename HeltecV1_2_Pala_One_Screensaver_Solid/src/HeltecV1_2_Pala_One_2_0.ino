@@ -1506,50 +1506,75 @@ static String normalizeTypography(const String& in) {
 }
 
 // -------- Text compaction (storage optimization) --------
-static String compactText(const String& in) {
-  String out;
-  out.reserve(in.length());
+// Streaming compactor: uploads arrive in chunks, so whitespace state must be
+// carried across chunk boundaries. (The old per-chunk compactText() trimmed
+// trailing spaces/newlines at the end of every chunk, which glued words
+// together, e.g. "Anhaengern entgegenrufen" -> "Anhaengernentgegenrufen".)
+//  - runs of spaces/tabs collapse to one space
+//  - at most one empty line between paragraphs
+//  - whitespace at the start/end of the file and around line breaks is
+//    dropped (pending whitespace is only written once the next visible
+//    character arrives)
+struct TextCompactor {
+  bool started = false;
+  bool pendingSpace = false;
+  uint8_t pendingNewlines = 0;
 
-  bool lastWasSpace = false;
-  int newlineCount = 0;
-
-  for (size_t i = 0; i < in.length(); i++) {
-    char c = in[i];
-
-    if (c == '\r') continue;
-    if (c == '\t') c = ' ';
-
-    if (c == '\n') {
-      while (out.length() > 0 && out[out.length() - 1] == ' ') {
-        out.remove(out.length() - 1);
-      }
-      newlineCount++;
-      if (newlineCount <= 2) out += '\n';
-      lastWasSpace = false;
-      continue;
-    }
-
-    newlineCount = 0;
-
-    if (c == ' ') {
-      if (!lastWasSpace) {
-        out += ' ';
-        lastWasSpace = true;
-      }
-      continue;
-    }
-
-    lastWasSpace = false;
-    out += c;
+  void reset() {
+    started = false;
+    pendingSpace = false;
+    pendingNewlines = 0;
   }
 
-  while (out.length() > 0 &&
-         (out[out.length() - 1] == ' ' || out[out.length() - 1] == '\n')) {
-    out.remove(out.length() - 1);
+  String feed(const String& in) {
+    String out;
+    out.reserve(in.length() + 2);
+    for (size_t i = 0; i < in.length(); i++) {
+      char c = in[i];
+      if (c == '\r') continue;
+      if (c == '\t') c = ' ';
+      if (c == '\n') {
+        pendingSpace = false;
+        if (pendingNewlines < 2) pendingNewlines++;
+        continue;
+      }
+      if (c == ' ') {
+        if (pendingNewlines == 0) pendingSpace = true;
+        continue;
+      }
+      if (started) {
+        if (pendingNewlines == 1) out += '\n';
+        else if (pendingNewlines >= 2) out += "\n\n";
+        else if (pendingSpace) out += ' ';
+      }
+      pendingNewlines = 0;
+      pendingSpace = false;
+      started = true;
+      out += c;
+    }
+    return out;
   }
+};
 
-  return out;
+static TextCompactor g_webCompactor;
+static TextCompactor g_serialCompactor;
+
+// Length of the longest prefix of `s` that does not end in the middle of a
+// UTF-8 character, so multi-byte characters are never split between chunks.
+static int utf8CompletePrefixLen(const String& s) {
+  int len = (int)s.length();
+  for (int back = 1; back <= 4 && back <= len; back++) {
+    uint8_t b = (uint8_t)s[len - back];
+    if ((b & 0xC0) == 0x80) continue;  // continuation byte, keep looking
+    int need = 1;
+    if ((b & 0xE0) == 0xC0) need = 2;
+    else if ((b & 0xF0) == 0xE0) need = 3;
+    else if ((b & 0xF8) == 0xF0) need = 4;
+    return (back < need) ? (len - back) : len;  // incomplete -> hold back
+  }
+  return len;
 }
+
 static inline bool isBookmarkLabelWordChar(char c) {
   return (c >= '0' && c <= '9') ||
          (c >= 'A' && c <= 'Z') ||
@@ -4106,6 +4131,7 @@ static void handleUploadBookStream() {
     g_upload.bookFinalName = "";
     g_upload.bookPendingUtf8Tail = "";
     g_upload.bookTmpPath = "";
+    g_webCompactor.reset();
 
     loadBooks();
     if (g_library.bookCount >= MAX_BOOKS) {
@@ -4133,27 +4159,18 @@ static void handleUploadBookStream() {
   else if (up.status == UPLOAD_FILE_WRITE) {
     if (g_upload.bookTmpFile && up.currentSize > 0) {
       String chunk = g_upload.bookPendingUtf8Tail + String((const char*)up.buf, up.currentSize);
-      int len = (int)chunk.length();
-      if (len > 3) {
-        g_upload.bookPendingUtf8Tail = chunk.substring(len - 3);
-        chunk = chunk.substring(0, len - 3);
-      } else {
-        g_upload.bookPendingUtf8Tail = chunk;
-        chunk = "";
-      }
+      int cut = utf8CompletePrefixLen(chunk);
+      g_upload.bookPendingUtf8Tail = chunk.substring(cut);
+      chunk = chunk.substring(0, cut);
       if (chunk.length() > 0) {
-        String cleaned = normalizeTypography(chunk);
-        cleaned = compactText(cleaned);
-        g_upload.bookTmpFile.print(cleaned);
+        g_upload.bookTmpFile.print(g_webCompactor.feed(normalizeTypography(chunk)));
       }
     }
   }
   else if (up.status == UPLOAD_FILE_END) {
     if (g_upload.bookTmpFile) {
       if (g_upload.bookPendingUtf8Tail.length() > 0) {
-        String cleaned = normalizeTypography(g_upload.bookPendingUtf8Tail);
-        cleaned = compactText(cleaned);
-        g_upload.bookTmpFile.print(cleaned);
+        g_upload.bookTmpFile.print(g_webCompactor.feed(normalizeTypography(g_upload.bookPendingUtf8Tail)));
         g_upload.bookPendingUtf8Tail = "";
       }
       g_upload.bookTmpFile.close();
@@ -4743,6 +4760,8 @@ static void pollSerialUpload() {
         g_serUp.tmpPath = tmpPath;
         g_serUp.lastByteMs = millis();
         g_serUp.totalBytes = sizeNum;
+        g_serUp.pendingUtf8Tail = "";
+        g_serialCompactor.reset();
         g_serUp.receivedBytes = 0;
         g_serUp.phase = SERUP_DATA;
         markUserActivity();
@@ -4785,18 +4804,11 @@ static void pollSerialUpload() {
       }
 
       String chunk = combo;
-      int len = (int)chunk.length();
-      if (len > 3) {
-        g_serUp.pendingUtf8Tail = chunk.substring(len - 3);
-        chunk = chunk.substring(0, len - 3);
-      } else {
-        g_serUp.pendingUtf8Tail = chunk;
-        chunk = "";
-      }
+      int cut = utf8CompletePrefixLen(chunk);
+      g_serUp.pendingUtf8Tail = chunk.substring(cut);
+      chunk = chunk.substring(0, cut);
       if (chunk.length() > 0) {
-        String cleaned = normalizeTypography(chunk);
-        cleaned = compactText(cleaned);
-        g_serUp.tmpFile.print(cleaned);
+        g_serUp.tmpFile.print(g_serialCompactor.feed(normalizeTypography(chunk)));
       }
       g_serUp.receivedBytes += r;
       Serial.print("PALA:ACK:");
@@ -4822,9 +4834,7 @@ static void pollSerialUpload() {
     }
 
     if (g_serUp.receivedBytes >= g_serUp.totalBytes) {
-      String clean = normalizeTypography(g_serUp.pendingUtf8Tail);
-      clean = compactText(clean);
-      g_serUp.tmpFile.print(clean);
+      g_serUp.tmpFile.print(g_serialCompactor.feed(normalizeTypography(g_serUp.pendingUtf8Tail)));
       g_serUp.pendingUtf8Tail = "";
       g_serUp.tmpFile.close();
       g_serUp.tmpFile = File();
