@@ -2,7 +2,7 @@ name: Mac App
 
 on:
   push:
-    branches: [main, mac-sync-app]
+    branches: [main, quotes-view]
     paths: ["mac/**", "tools/**", ".github/workflows/mac-app.yml"]
   pull_request:
     paths: ["mac/**", "tools/**", ".github/workflows/mac-app.yml"]
@@ -23,6 +23,10 @@ jobs:
 
       - name: Check Python sync script
         run: python3 tools/sync_books.py --help
+
+      - name: Unit tests (Markdown notes)
+        working-directory: mac
+        run: swift test
 
       - name: Build app
         env:

@@ -20,6 +20,8 @@ final class SyncModel: ObservableObject {
     }
     @Published var launchAtLogin: Bool
 
+    let quoteStore = QuoteStore()
+
     private enum Keys {
         static let folder = "sourceFolder"
         static let autoSync = "autoSync"
@@ -56,6 +58,8 @@ final class SyncModel: ObservableObject {
             sourceFolder = Self.defaultFolder
             d.set(Self.defaultFolder.path, forKey: Keys.folder)
         }
+
+        quoteStore.notesFolder = sourceFolder?.appendingPathComponent("Notes")
 
         // Do not auto-sync just because the app was started while the Pala
         // is already plugged in; only react to plugging it in.
@@ -120,6 +124,7 @@ final class SyncModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url {
             sourceFolder = url
             UserDefaults.standard.set(url.path, forKey: Keys.folder)
+            quoteStore.notesFolder = url.appendingPathComponent("Notes")
         }
     }
 
@@ -267,6 +272,7 @@ final class SyncModel: ObservableObject {
         process = nil
         outputPipe = nil
         isSyncing = false
+        quoteStore.reload()
         currentStep = ""
         progress = nil
 

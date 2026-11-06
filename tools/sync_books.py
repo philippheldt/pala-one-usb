@@ -107,27 +107,6 @@ def clean_and_merge_quotes(page_quotes):
 
     return final_quotes
 
-def extract_existing_quotes_from_md(md_path):
-    """Liest bereits bestehende Zitate aus einer existierenden Markdown-Datei aus."""
-    existing_quotes = []
-    if not os.path.exists(md_path):
-        return existing_quotes
-
-    try:
-        with open(md_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Parst bestehende Zitate-Blöcke (> "Text" \n *(Seite X)*)
-        matches = re.findall(r'>\s*"?([\s\S]*?)"?\s*\n\*\((?:Seiten|Seite)\s*([0-9–\-]+)\)\*', content)
-        for text, page_num in matches:
-            # Bei Bereichen wie "3–4" nehmen wir die erste Seite für die Sortierung
-            first_page = page_num.split("–")[0].split("-")[0].strip()
-            existing_quotes.append((first_page, text.strip()))
-    except Exception as e:
-        print(f"   Hinweis: Konnte bestehende Markdown-Zitate nicht parsen: {e}")
-
-    return existing_quotes
-
 def generate_markdown_note(book_name, processed_quotes):
     """Generiert ein sauber strukturiertes Markdown-Dokument."""
     base_name = os.path.splitext(book_name)[0]
@@ -148,6 +127,52 @@ def generate_markdown_note(book_name, processed_quotes):
         lines.append(f"*({page_label})*\n")
 
     return "\n".join(lines)
+
+PAGE_LINE_RE = re.compile(r'^\*\((?:Seiten|Seite)\s*([0-9]+)', re.M)
+COUNT_LINE_RE = re.compile(r'^\*\*Anzahl Zitate:\*\*.*$', re.M)
+DATE_LINE_RE = re.compile(r'^\*\*Zuletzt aktualisiert:\*\*.*$', re.M)
+
+
+def render_quote_block(page_label, quote_text):
+    return f'> "{quote_text}"\n*({page_label})*\n'
+
+
+def append_quotes_to_note(md_path, book_name, raw_new_quotes):
+    """Hängt neue Zitate an die Notiz an, ohne Bestehendes zu verändern.
+    Nur die Kopfzeilen "Zuletzt aktualisiert" und "Anzahl Zitate" werden
+    aktualisiert. Gibt die Zahl der angehängten Zitate zurück."""
+    processed = clean_and_merge_quotes(raw_new_quotes)
+
+    if os.path.exists(md_path):
+        with open(md_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    else:
+        content = generate_markdown_note(book_name, []).rstrip("\n") + "\n"
+
+    existing_pages = {int(p) for p in PAGE_LINE_RE.findall(content)}
+    new_blocks = []
+    for page_label, quote_text in processed:
+        first = re.search(r"[0-9]+", page_label)
+        if first and int(first.group(0)) in existing_pages:
+            continue  # diese Seite ist schon als Zitat vorhanden
+        new_blocks.append(render_quote_block(page_label, quote_text))
+
+    if not new_blocks:
+        return 0
+
+    content = content.rstrip("\n") + "\n\n" + "\n".join(new_blocks)
+
+    total = len(PAGE_LINE_RE.findall(content))
+    sync_date = datetime.now().strftime("%d.%m.%Y um %H:%M Uhr")
+    content = COUNT_LINE_RE.sub(lambda m: f"**Anzahl Zitate:** {total}", content, count=1)
+    content = DATE_LINE_RE.sub(lambda m: f"**Zuletzt aktualisiert:** {sync_date}  ", content, count=1)
+
+    tmp_path = md_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp_path, md_path)
+    return len(new_blocks)
+
 
 def clear_pala_log(port):
     """Befiehlt dem Pala über USB, die /.zitate_log.txt auf 0 Bytes zu leeren."""
@@ -194,30 +219,21 @@ def sync_quotes_log(port):
 
                     new_quotes_by_book[book_name].append((page_num, quote_text))
 
-            # Für jedes Buch: Alte Zitate aus bestehender MD laden + Neue anfügen
+            # Für jedes Buch: neue Zitate an die bestehende Notiz ANHÄNGEN.
+            # Die Datei wird nicht neu geschrieben, damit Notizen und
+            # Bearbeitungen (Mac-App, Obsidian, ...) erhalten bleiben.
             for book_name, raw_new_quotes in new_quotes_by_book.items():
                 base_name = os.path.splitext(book_name)[0]
                 md_filename = f"Note_{base_name}.md"
                 md_path = os.path.join(NOTES_DIR, md_filename)
 
-                # 1. Vorhandene Zitate aus bestehender MD-Datei auslesen
-                all_raw_quotes = extract_existing_quotes_from_md(md_path)
-
-                # 2. Neue Zitate hinzufügen
-                all_raw_quotes.extend(raw_new_quotes)
-
-                # 3. Bereinigen, sortieren und zusammenführen
-                processed_quotes = clean_and_merge_quotes(all_raw_quotes)
-
-                # 4. Markdown erzeugen und speichern
-                md_code = generate_markdown_note(book_name, processed_quotes)
-
-                with open(md_path, "w", encoding="utf-8") as mf:
-                    mf.write(md_code)
-
-                print(f"✅ Zitate angehängt & aktualisiert: Notes/{md_filename}")
-                STATS["quotes"] += len(raw_new_quotes)
-                emit("quotes", book=book_name, count=len(raw_new_quotes), file=md_filename)
+                added = append_quotes_to_note(md_path, book_name, raw_new_quotes)
+                if added:
+                    print(f"✅ {added} Zitat(e) angehängt: Notes/{md_filename}")
+                    STATS["quotes"] += added
+                    emit("quotes", book=book_name, count=added, file=md_filename)
+                else:
+                    print(f"    Keine neuen Zitate für {book_name} (bereits vorhanden)")
 
             os.remove(temp_log)
 

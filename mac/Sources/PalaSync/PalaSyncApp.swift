@@ -57,6 +57,11 @@ struct MenuContent: View {
         .keyboardShortcut("s")
         .disabled(model.isSyncing)
 
+        Button("Zitate anzeigen …") {
+            QuotesWindow.show(store: model.quoteStore)
+        }
+        .keyboardShortcut("z")
+
         Button("Protokoll anzeigen") {
             LogWindow.show(model: model)
         }
